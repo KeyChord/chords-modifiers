@@ -1,0 +1,27 @@
+{
+  "name": "@keychord/chords-modifiers",
+  "displayName": "Modifier Chords",
+  "version": "0.0.0",
+  "description": "Global chords that press a keyboard shortcut in whichever app is focused.",
+  "categories": [
+    "Input"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/KeyChord/chords-modifiers"
+  },
+  "type": "module",
+  "exports": {
+    ".": "./src/js/keys.ts"
+  },
+  "scripts": {
+    "test": "bun test --isolate"
+  },
+  "devDependencies": {
+    "@keychord/chordtest": "workspace:*",
+    "@keychord/config": "catalog:",
+    "@keychord/tsconfig": "catalog:",
+    "@types/bun": "latest"
+  },
+  "packageManager": "pnpm@12.11.2"
+}
