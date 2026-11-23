@@ -1,0 +1,157 @@
+import { readFileSync } from "node:fs";
+import { tap } from "chord";
+import { chordPattern, type ChordPlaceholders } from "@keychord/chordtest/patterns";
+import { beforeEach, expect, test } from "bun:test";
+import { mocked } from "@keychord/chordtest/test";
+import buildKeysHandler, { modifierShortcut } from "../src/js/keys";
+
+const source = readFileSync(new URL("../chords/macos.toml", import.meta.url), "utf8");
+const { placeholders } = Bun.TOML.parse(source) as { placeholders: ChordPlaceholders };
+const bindings = Array.from(
+  source.matchAll(/^'([^']+)' = .*'@input:keys' = \['(\$\d+)'\]/gm),
+  ([, pattern, argument]) => ({ pattern: chordPattern(pattern, placeholders), argument }),
+);
+const letters = ["a", "c", "f", "m", "s"];
+const nativeModifiers = ["alt", "ctrl", "fn", "cmd", "shift"];
+const combinations = Array.from({ length: 31 }, (_, index) => index + 1).flatMap((mask) => {
+  const selected = letters.filter((_, index) => mask & (1 << index));
+  return selected.map((entry) => ({
+    entry,
+    suffix: selected.filter((letter) => letter !== entry).join(""),
+    modifiers: nativeModifiers.filter((_, index) => mask & (1 << index)).join("+"),
+  }));
+});
+const regularKeys = "abcdefghijklmnopqrstuvwxyz0123456789`-=[]\\;',./";
+
+function capture(input: string): string {
+  const matches = bindings.flatMap(({ pattern, argument }) => {
+    const match = pattern.exec(input);
+    return match ? [match[Number(argument.slice(1))]] : [];
+  });
+  expect(matches).toHaveLength(1);
+  return matches[0];
+}
+
+function permutations(value: string): string[] {
+  if (!value) return [""];
+  return [...value].flatMap((letter, index) =>
+    permutations(value.slice(0, index) + value.slice(index + 1)).map((rest) => letter + rest),
+  );
+}
+
+beforeEach(() => {
+  mocked(tap).mockImplementation(() => {});
+});
+
+test("all five modifier entry points capture a key followed by optional modifiers", () => {
+  expect(source).toMatch(/\[on\.keys\]\s+file = 'keys\.js'/);
+  expect(bindings.map(({ pattern }) => pattern.source)).toEqual(
+    ["m", "c", "a", "f", "s"].map((entry) => chordPattern(`;k(${entry}.[acfms]*)`).source),
+  );
+  expect(placeholders).toEqual({ "<>": { name: "Modifier keys prefix", default: "k" } });
+  for (const letter of letters) expect(source).toContain(`'?<>${letter}' = `);
+});
+
+test.each([
+  [";kmv", "cmd+v"],
+  [";kmvs", "cmd+shift+v"],
+  [";kmcsa", "alt+cmd+shift+c"],
+  [";kmcas", "alt+cmd+shift+c"],
+  [";kms", "cmd+s"],
+  [";kmm", "cmd+m"],
+  [";kmc", "cmd+c"],
+  [";kma", "cmd+a"],
+  [";kmf", "cmd+f"],
+  [";kcc", "ctrl+c"],
+  [";kss", "shift+s"],
+  [";km-", "cmd+-"],
+])("%s sends %s", (input, shortcut) => {
+  buildKeysHandler()(capture(input));
+  expect(tap).toHaveBeenCalledTimes(1);
+  expect(tap).toHaveBeenCalledWith(shortcut);
+});
+
+test.each(combinations)(
+  ";k$entryv$suffix supports $modifiers with every suffix order",
+  ({ entry, suffix, modifiers }) => {
+    for (const ordering of permutations(suffix)) {
+      mocked(tap).mockClear();
+      const sequence = capture(`;k${entry}v${ordering}`);
+      const expected = `${modifiers}+v`;
+      expect(modifierShortcut(sequence)).toBe(expected);
+      if (!modifiers.split("+").includes("fn")) {
+        buildKeysHandler()(sequence);
+        expect(tap).toHaveBeenCalledWith(expected);
+      }
+    }
+  },
+);
+
+test.each(letters)(";k%s treats the next character as a literal regular key", (entry) => {
+  for (const key of regularKeys) {
+    mocked(tap).mockClear();
+    const sequence = capture(`;k${entry}${key}`);
+    const expected = `${nativeModifiers[letters.indexOf(entry)]}+${key}`;
+    expect(modifierShortcut(sequence)).toBe(expected);
+    if (entry !== "f") {
+      buildKeysHandler()(sequence);
+      expect(tap).toHaveBeenCalledWith(expected);
+    }
+  }
+});
+
+test("repeated modifiers are applied only once, including the entry modifier", () => {
+  expect(modifierShortcut(capture(";kmcsmasas"))).toBe("alt+cmd+shift+c");
+  expect(modifierShortcut(capture(";kmvmmss"))).toBe("cmd+shift+v");
+});
+
+test.each([
+  ";k",
+  ...letters.map((letter) => `;k${letter}`),
+  ";kmcv",
+  ";k-x",
+  ";k-",
+  ".mv",
+  ",mv",
+  "xmv",
+  "j.mv",
+  ";kmvz",
+  ";km-v",
+  ";kms-v",
+  ";kb20l30",
+  ";kt20l30",
+  ";kl30t20",
+  ";kr30t20",
+])("modifier mappings leave incomplete, invalid, and click input unmatched: %s", (input) => {
+  expect(bindings.some(({ pattern }) => pattern.test(input))).toBe(false);
+});
+
+test.each([
+  "",
+  "-c",
+  "m",
+  "vc",
+  "mcv",
+  "m-v",
+  "ms-v",
+  "mc+v",
+  "mc v",
+  "mc\nv",
+  "mc\n",
+  "mc😀",
+  "m😀",
+  "mC",
+  "m ",
+  "m\n",
+  "mvS",
+])("invalid input rejects the entire sequence before native input: %s", (sequence) => {
+  expect(() => buildKeysHandler()(sequence)).toThrow(TypeError);
+  expect(tap).not.toHaveBeenCalled();
+});
+
+test("native input failures propagate", () => {
+  mocked(tap).mockImplementation(() => {
+    throw new Error("Accessibility denied");
+  });
+  expect(() => buildKeysHandler()("mv")).toThrow("Accessibility denied");
+});
